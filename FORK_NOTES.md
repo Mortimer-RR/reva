@@ -159,6 +159,37 @@ Upstream issue draft:
 > a plain bool written by concurrent uploads (data race under `-race`).
 > Reproduction: `blobstore_copytarget_test.go` in the linked PR.
 
+### 4. `fix(tus): return 460 for checksum mismatches instead of 500`
+
+Branch `fix/tus-error-status`. The desktop half lives in the desktop fork.
+
+- `pkg/storage/pkg/decomposedfs/upload/upload.go` `FinishUpload`:
+  `errtypes.ChecksumMismatch` → tusd `ERR_CHECKSUM_MISMATCH` **460** (tus checksum
+  extension status), `errtypes.BadRequest` → **400**. Previously both were a generic
+  500.
+- The size mismatch from fix 1 is an `errtypes.ChecksumMismatch` too, so it also maps
+  to **460** (decision: the stored bytes don't match what the client declared, and the
+  session is gone, so the client must start over, same as a checksum mismatch).
+- 460 is relayed unchanged by the datagateway and by ocdav's creation-with-upload path.
+  The plain-PUT datatx paths keep their existing 419 for checksum mismatches.
+- Client impact: the desktop client classifies 460 as `NormalError` (retried). The
+  desktop fork additionally clears its resume info on 460. tus-js-client (web) does not
+  retry 4xx responses other than 409/423, so a web upload with a wrong checksum now
+  fails immediately instead of retrying a deleted upload on 500.
+- Tests: `upload_status_test.go` (unit, mapping) and `tus_status_test.go` (real tusd
+  handler over HTTP: wrong checksum → 460, correct checksum → 204). Before the fix the
+  HTTP test got 500.
+
+Upstream issue draft:
+
+> **tus: checksum mismatch at the end of an upload is reported as 500**
+>
+> `decomposedfs/upload` `FinishUpload` maps only `AlreadyExists` and `Aborted` to tusd
+> errors. A `ChecksumMismatch` (and `BadRequest`) falls through and tusd sends a 500,
+> although the upload session has already been deleted. Clients treat 500 as
+> transient and keep retrying a dead upload URL. The tus checksum extension defines
+> 460 Checksum Mismatch for this case.
+
 ## Upstream issues in dependencies (not patched here)
 
 - **tusd v2.10.0/v2.10.1 data race** (`pkg/handler/context.go:65` vs
