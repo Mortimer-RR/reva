@@ -83,6 +83,54 @@ Upstream issue draft:
 Upstream PR draft: title as the commit subject; body = the commit message, plus
 "Fixes #<issue>". Attach the test output before and after the change.
 
+### 2. `fix(posix): restore revisions atomically and guard upload rollback`
+
+Branch `fix/atomic-restore-revision`.
+
+- `pkg/storage/fs/posix/tree/revisions.go` `RestoreRevision`: copies the revision into
+  a temp file in `<space>/.oc-tmp`, fsyncs it, copies the target's `user.oc.*` xattrs,
+  mode and owner onto it (best effort for the owner: a failed chown is logged, not
+  fatal), applies the revision's checksum, blobid, blobsize and type attributes and
+  the mtime, then `rename()`s it over the target. The mtime is then set once more
+  through the metadata backend so its cache picks up the new attributes. The "current"
+  copy for `EnableFSRevisions` is unchanged.
+- `pkg/storage/pkg/decomposedfs/upload/upload.go` `Cleanup` (the `versionID` branch):
+  takes the node's metadata lock and re-reads the status through the metadata
+  backend, bypassing the node's own attribute cache. It only restores when the node is
+  still `processing:<this session>`. Otherwise it logs, keeps the node content, and
+  leaves the revision as an ordinary version. The revision is deleted only after a
+  successful restore, as before.
+- The lock is released before the rest of `Cleanup` runs. `UnmarkProcessing` locks
+  again through a different node object, and flock locks on separate file
+  descriptors would self-deadlock.
+- Tests: `pkg/storage/fs/posix/tree/revisions_test.go` (restore keeps node metadata;
+  a failed copy leaves the target untouched; concurrent readers only ever see the old
+  or the new content); `upload_async_test.go` "two uploads overwrite an existing file
+  in parallel".
+- Before the fix, a failed copy truncates the target to 0 bytes, 3831 of 3841
+  concurrent reads saw a partial file, and the aborted older upload rolled the file
+  back from 20 to 10 bytes.
+- Not changed: downloads still don't take the node lock. With an atomic rename they
+  don't need it to get consistent bytes (an open fd keeps the old inode). The
+  decomposed driver's `RestoreRevision` only rewrites xattrs and wasn't touched.
+
+Upstream issue draft:
+
+> **posix: RestoreRevision overwrites the live file in place; aborted uploads can roll
+> back newer content**
+>
+> 1. `posix/tree/revisions.go` `RestoreRevision` truncates the target and `io.Copy`s
+>    the revision into it. Readers see truncated or mixed data; a failed copy leaves
+>    the file empty while its xattrs describe the old content.
+> 2. `decomposedfs/upload` `Cleanup` restores the session's `versionID` revision
+>    without the node lock and without checking that the session still owns the node.
+>    Unlike the branch below it, it doesn't compare `ProcessingID`. If postprocessing of
+>    an older upload fails after a newer upload has finished, the newer content is
+>    replaced by the version from before the older upload.
+>
+> Reproduction: `revisions_test.go` and the new `upload_async_test.go` case in the
+> linked PR, both failing on current main.
+
 ## Upstream issues in dependencies (not patched here)
 
 - **tusd v2.10.0/v2.10.1 data race** (`pkg/handler/context.go:65` vs
