@@ -131,6 +131,34 @@ Upstream issue draft:
 > Reproduction: `revisions_test.go` and the new `upload_async_test.go` case in the
 > linked PR, both failing on current main.
 
+### 3. `fix(posix): write the fs-revisions copy from the stored file`
+
+Branch `fix/fs-revisions-copy`.
+
+- `pkg/storage/fs/posix/blobstore/blobstore.go` `Upload`: the copy target (used only
+  when `STORAGE_USERS_POSIX_ENABLE_FS_REVISIONS=true`) is now read from
+  `n.InternalPath()` instead of the upload source, which the default rename path has
+  already moved. The copy is fsynced and closed with error checks.
+  `canUseRenameForUpload` is an `atomic.Bool`, read once per upload.
+- Tests: `blobstore_copytarget_test.go` (copy target on both the rename and copy
+  paths; `Tree.WriteBlob` with `enable_fs_revisions`; concurrent cross-device uploads
+  under `-race`).
+- Before the fix, `Upload` with a copy target on the rename path failed with "could
+  not open source file", so `Tree.WriteBlob` failed and the upload would stay in
+  processing. `-race` reported the `canUseRenameForUpload` write/read race.
+- Keep `STORAGE_USERS_POSIX_ENABLE_FS_REVISIONS` **off** in production regardless.
+
+Upstream issue draft:
+
+> **posix: enable_fs_revisions makes every upload fail at finalize**
+>
+> `posix/blobstore` `Upload` renames the upload source into place and then
+> `os.Open(source)`s it again to write the copy target that `Tree.WriteBlob` passes
+> when `EnableFSRevisions` is set. The open fails and `WriteBlob` returns an error
+> after the blob was stored, so finalization fails. Also, `canUseRenameForUpload` is
+> a plain bool written by concurrent uploads (data race under `-race`).
+> Reproduction: `blobstore_copytarget_test.go` in the linked PR.
+
 ## Upstream issues in dependencies (not patched here)
 
 - **tusd v2.10.0/v2.10.1 data race** (`pkg/handler/context.go:65` vs
