@@ -173,9 +173,9 @@ Branch `fix/tus-error-status`. The desktop half lives in the desktop fork.
 - 460 is relayed unchanged by the datagateway and by ocdav's creation-with-upload path.
   The plain-PUT datatx paths keep their existing 419 for checksum mismatches.
 - Client impact: the desktop client classifies 460 as `NormalError` (retried). The
-  desktop fork additionally clears its resume info on 460. tus-js-client (web) does not
-  retry 4xx responses other than 409/423, so a web upload with a wrong checksum now
-  fails immediately instead of retrying a deleted upload on 500.
+  desktop fork additionally clears its resume info on 460. The web client already
+  refused to retry 5xx responses (its own `onShouldRetry`), and tus-js-client does not
+  retry 4xx other than 409/423, so for web uploads only the reported status changes.
 - Tests: `upload_status_test.go` (unit, mapping) and `tus_status_test.go` (real tusd
   handler over HTTP: wrong checksum → 460, correct checksum → 204). Before the fix the
   HTTP test got 500.
