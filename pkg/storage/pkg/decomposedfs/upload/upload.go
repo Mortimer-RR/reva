@@ -46,6 +46,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/rhttp/datatx/metrics"
 	"github.com/opencloud-eu/reva/v2/pkg/rhttp/datatx/utils/download"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/disk"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/metadata"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/metadata/prefixes"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/node"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
@@ -446,32 +447,59 @@ func (session *DecomposedFsSession) Cleanup(revertNodeMetadata, cleanBin, cleanI
 		} else {
 			if session.NodeExists() && session.info.MetaData["versionID"] != "" {
 				versionID := session.info.MetaData["versionID"]
-				sublog.Debug().Str("nodepath", n.InternalPath()).Str("versionID", versionID).Msg("restoring revision")
-				revisionNode, err := node.ReadNode(ctx, session.store.lu, session.SpaceID(), versionID, "", false, n.SpaceRoot, false)
-				if err != nil {
-					sublog.Error().Err(err).Str("versionID", versionID).Msg("reading revision node failed")
+				ok := func() bool {
+					// lock the node so that no other upload can finish while we restore the revision
+					unlock, err := session.store.lu.MetadataBackend().Lock(n)
+					if err != nil {
+						sublog.Error().Err(err).Str("versionID", versionID).Msg("locking node failed")
+						return false
+					}
+					defer func() { _ = unlock() }()
+
+					// only roll back if this session still owns the node. Otherwise a newer upload has
+					// replaced the content since, and restoring would overwrite it with the old version.
+					// Read the status through the backend, the node may have cached it before we locked.
+					status, err := session.store.lu.MetadataBackend().Get(ctx, n, prefixes.StatusPrefix)
+					if err != nil && !metadata.IsAttrUnset(err) {
+						sublog.Error().Err(err).Str("versionID", versionID).Msg("reading processingid for session failed")
+						return false
+					}
+					if string(status) != node.ProcessingStatus+session.ID() {
+						sublog.Info().Str("versionID", versionID).Str("status", string(status)).Msg("node was changed by another upload, keeping it and the revision")
+						return true
+					}
+
+					sublog.Debug().Str("nodepath", n.InternalPath()).Str("versionID", versionID).Msg("restoring revision")
+					revisionNode, err := node.ReadNode(ctx, session.store.lu, session.SpaceID(), versionID, "", false, n.SpaceRoot, false)
+					if err != nil {
+						sublog.Error().Err(err).Str("versionID", versionID).Msg("reading revision node failed")
+						return false
+					}
+
+					if !revisionNode.Exists {
+						sublog.Error().Str("versionID", versionID).Msg("revision node does not exist")
+						return false
+					}
+
+					// restore the revision
+					mtime, err := revisionNode.GetMTime(ctx)
+					if err != nil {
+						sublog.Error().Err(err).Str("versionID", versionID).Msg("getting mtime of revision node failed")
+						mtime = time.Now()
+					}
+
+					if err := session.store.tp.RestoreRevision(ctx, revisionNode, n, mtime); err != nil {
+						sublog.Error().Err(err).Str("versionID", versionID).Msg("restoring revision node failed")
+						return false
+					}
+
+					if err := os.RemoveAll(revisionNode.InternalPath()); err != nil {
+						sublog.Error().Err(err).Str("revisionpath", revisionNode.InternalPath()).Msg("removing restored revision file failed")
+					}
+					return true
+				}()
+				if !ok {
 					return
-				}
-
-				if !revisionNode.Exists {
-					sublog.Error().Str("versionID", versionID).Msg("revision node does not exist")
-					return
-				}
-
-				// restore the revision
-				mtime, err := revisionNode.GetMTime(ctx)
-				if err != nil {
-					sublog.Error().Err(err).Str("versionID", versionID).Msg("getting mtime of revision node failed")
-					mtime = time.Now()
-				}
-
-				if err := session.store.tp.RestoreRevision(ctx, revisionNode, n, mtime); err != nil {
-					sublog.Error().Err(err).Str("versionID", versionID).Msg("restoring revision node failed")
-					return
-				}
-
-				if err := os.RemoveAll(revisionNode.InternalPath()); err != nil {
-					sublog.Error().Err(err).Str("revisionpath", revisionNode.InternalPath()).Msg("removing restored revision file failed")
 				}
 			} else {
 				// if no other upload session is in progress (processing id != session id) or has finished (processing id == "")
