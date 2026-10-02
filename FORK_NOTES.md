@@ -190,6 +190,43 @@ Upstream issue draft:
 > transient and keep retrying a dead upload URL. The tus checksum extension defines
 > 460 Checksum Mismatch for this case.
 
+## Found by the torture test, not fixed (outside the handoff's scope)
+
+### Restoring a version with the same mtime as the current file loses that version
+
+Reproduced on upstream (`opencloud-eu/opencloud` `a1982c6908`, unmodified reva) and on
+the fork alike, so it isn't caused by fix 2.
+
+1. Upload content A, then content B to the same file, both with the same mtime (clients
+   that preserve mtimes do this: the desktop client, the web client's `lastModified`,
+   `rsync -t`, two copies of the same file).
+2. Restore the version (A): `COPY /remote.php/dav/meta/<fileid>/v/<id>.REV.<mtime>`.
+3. The server answers 204, but the file still contains B. The version list now shows
+   `<id>.REV.<mtime>.1`, and downloading it fails with 500, so A is unreachable.
+
+Cause (by reading): `Decomposedfs.RestoreRevision` first calls `CreateRevision` for the
+current content, keyed by its mtime. With equal mtimes that key is the revision being
+restored, so `CreateRevision`'s collision handling renames A to `.REV.<mtime>.1` and
+writes B into `.REV.<mtime>`. The restore then copies that (B) back, and the
+`.1` revision's metadata no longer matches.
+
+Upstream issue draft:
+
+> **Restoring a version with the same mtime as the current file keeps the current
+> content and makes the version unreadable**
+>
+> Steps: upload A and then B to one file with identical mtimes (X-OC-Mtime / tus
+> `mtime`), restore the only version. Expected: content A. Actual: 204, content stays
+> B, the version is renamed to `.REV.<mtime>.1` and GET on it returns 500.
+> `RestoreRevision` creates a revision of the current node with the same key as the
+> revision being restored (`CreateRevision` → `os.IsExist` → rename).
+
+### 0-byte files have no stored checksums
+
+`oc:checksums` is empty for 0-byte files (TUS and PUT), while every other size gets
+SHA1/MD5/ADLER32. The content is correct (empty). Clients that compare checksums can't
+verify empty files. This was noted, not changed.
+
 ## Upstream issues in dependencies (not patched here)
 
 - **tusd v2.10.0/v2.10.1 data race** (`pkg/handler/context.go:65` vs
